@@ -5,38 +5,64 @@ import crypto from "crypto";
 const app = express();
 app.use(express.json());
 
-async function downloadFile(url) {
-  const res = await axios.get(url, { responseType: "arraybuffer" });
-  return Buffer.from(res.data);
-}
-
-function decryptMedia(encBuf, mediaKeyBase64) {
-  const mediaKey = Buffer.from(mediaKeyBase64, "base64");
-
-  const expanded = crypto.createHmac("sha256", Buffer.from("WhatsApp Audio Keys")).update(mediaKey).digest();
-
-  const iv = expanded.subarray(0, 16);
-  const cipherKey = expanded.subarray(16, 48);
-
-  const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
-  
-  let decrypted = Buffer.concat([decipher.update(encBuf), decipher.final()]);
-  return decrypted;
-}
-
 app.post("/decrypt-media", async (req, res) => {
   try {
-    const { url, mediaKey } = req.body;
+    const { url, mediaKey, fileEncSha256 } = req.body;
 
-    if (!url || !mediaKey) return res.status(400).json({ error: "Missing url/mediaKey" });
+    if (!url || !mediaKey || !fileEncSha256) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
 
-    const encFile = await downloadFile(url);
-    const decrypted = decryptMedia(encFile, mediaKey);
+    // Step 1 → Convert Base64 mediaKey into buffer
+    const mediaKeyBuf = Buffer.from(mediaKey, "base64");
 
-    return res.send(decrypted.toString("base64")); // return base64 media
+    if (mediaKeyBuf.length !== 32) {
+      return res.status(400).json({
+        error: "Invalid key length",
+        details: `Expected 32 bytes, got ${mediaKeyBuf.length}`
+      });
+    }
+
+    // Step 2 → Derive AES key + IV using HKDF
+    const expandedKey = crypto.hkdfSync(
+      "sha256",
+      mediaKeyBuf,
+      "", 
+      "WhatsApp Media Keys",
+      112
+    );
+
+    const iv = expandedKey.subarray(0, 16);
+    const cipherKey = expandedKey.subarray(16, 48);
+
+    // Step 3 → Download encrypted audio
+    const encrypted = await axios.get(url, { responseType: "arraybuffer" });
+    const encBuffer = Buffer.from(encrypted.data);
+
+    // Step 4 → Remove last 10 bytes (MAC)
+    const fileData = encBuffer.subarray(0, encBuffer.length - 10);
+
+    // Step 5 → AES-CBC decrypt
+    const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
+    let decrypted = Buffer.concat([decipher.update(fileData), decipher.final()]);
+
+    return res.send({
+      success: true,
+      size: decrypted.length,
+      audioBase64: decrypted.toString("base64")
+    });
+
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error(err);
+    return res.status(500).json({
+      error: "Decryption failed",
+      details: err.message
+    });
   }
 });
 
-app.listen(3000, () => console.log("Running!"));
+app.get("/", (req, res) => {
+  res.send("WhatsApp Media Decryption API Running!");
+});
+
+app.listen(3000, () => console.log("Server running on port 3000"));
