@@ -1,75 +1,31 @@
-import express from "express";
-import axios from "axios";
-import crypto from "crypto";
+// axios use karenge HTTP call ke liye
+const axios = require('axios');
 
-const app = express();
-app.use(express.json());
+const item = items[0];
+const message = item.json.body?.data?.messages?.message;
+if (!message) return null;
 
-app.post("/decrypt-media", async (req, res) => {
-  try {
-    const { url, mediaKey, fileEncSha256 } = req.body;
+// Audio/Image/Video check
+let mediaDetails = message.audioMessage || message.imageMessage || message.videoMessage || message.documentMessage;
+if (!mediaDetails) return null;
 
-    if (!url || !mediaKey || !fileEncSha256) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
+// Media info
+const mediaUrl = mediaDetails.url;
+const mediaType = mediaDetails.mimetype.split('/')[0]; // "audio" / "image" / "video"
 
-    // Step 1: Convert Base64 mediaKey → Buffer
-    const mediaKeyBuf = Buffer.from(mediaKey, "base64");
+// Call external decrypt service
+const response = await axios.post(
+  'https://wasender-decrypt-2.onrender.com/decrypt',
+  { url: mediaUrl, mediaKey: mediaDetails.mediaKey, type: mediaType },
+  { responseType: 'arraybuffer' } // important for binary
+);
 
-    if (mediaKeyBuf.length !== 32) {
-      return res.status(400).json({
-        error: "Invalid key length",
-        details: `Expected 32 bytes, got ${mediaKeyBuf.length}`
-      });
-    }
+// Prepare binary data for n8n
+const mimeType = mediaDetails.mimetype;
+const fileName = `file.${mimeType.split('/')[1]}`;
 
-    // Step 2: HKDF derive 112 bytes key material
-    let expandedKey = crypto.hkdfSync(
-      "sha256",
-      mediaKeyBuf,
-      "",
-      "WhatsApp Media Keys",
-      112
-    );
+item.binary = {
+  data: await this.helpers.prepareBinaryData(response.data, fileName, mimeType)
+};
 
-    // ❤️ FIX HERE → Convert Uint8Array → Buffer
-    expandedKey = Buffer.from(expandedKey);
-
-    // Step 3: Extract IV + cipherKey
-    const iv = expandedKey.subarray(0, 16);
-    const cipherKey = expandedKey.subarray(16, 48);
-
-    // Step 4: Download encrypted file from WhatsApp
-    const encrypted = await axios.get(url, { responseType: "arraybuffer" });
-    const encBuffer = Buffer.from(encrypted.data);
-
-    // Step 5: Remove MAC (last 10 bytes)
-    const fileData = encBuffer.subarray(0, encBuffer.length - 10);
-
-    // Step 6: Decrypt using AES-256-CBC
-    const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
-    const decrypted = Buffer.concat([
-      decipher.update(fileData),
-      decipher.final()
-    ]);
-
-    return res.send({
-      success: true,
-      size: decrypted.length,
-      audioBase64: decrypted.toString("base64")
-    });
-
-  } catch (err) {
-    console.error("DECRYPT ERROR:", err);
-    return res.status(500).json({
-      error: "Decryption failed",
-      details: err.message
-    });
-  }
-});
-
-app.get("/", (req, res) => {
-  res.send("WhatsApp Media Decryption API Running!");
-});
-
-app.listen(3000, () => console.log("Server running on port 3000"));
+return item;
