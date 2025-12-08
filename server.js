@@ -13,7 +13,7 @@ app.post("/decrypt-media", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Step 1 → Convert Base64 mediaKey into buffer
+    // Step 1: Convert Base64 mediaKey → Buffer
     const mediaKeyBuf = Buffer.from(mediaKey, "base64");
 
     if (mediaKeyBuf.length !== 32) {
@@ -23,28 +23,35 @@ app.post("/decrypt-media", async (req, res) => {
       });
     }
 
-    // Step 2 → Derive AES key + IV using HKDF
-    const expandedKey = crypto.hkdfSync(
+    // Step 2: HKDF derive 112 bytes key material
+    let expandedKey = crypto.hkdfSync(
       "sha256",
       mediaKeyBuf,
-      "", 
+      "",
       "WhatsApp Media Keys",
       112
     );
 
+    // ❤️ FIX HERE → Convert Uint8Array → Buffer
+    expandedKey = Buffer.from(expandedKey);
+
+    // Step 3: Extract IV + cipherKey
     const iv = expandedKey.subarray(0, 16);
     const cipherKey = expandedKey.subarray(16, 48);
 
-    // Step 3 → Download encrypted audio
+    // Step 4: Download encrypted file from WhatsApp
     const encrypted = await axios.get(url, { responseType: "arraybuffer" });
     const encBuffer = Buffer.from(encrypted.data);
 
-    // Step 4 → Remove last 10 bytes (MAC)
+    // Step 5: Remove MAC (last 10 bytes)
     const fileData = encBuffer.subarray(0, encBuffer.length - 10);
 
-    // Step 5 → AES-CBC decrypt
+    // Step 6: Decrypt using AES-256-CBC
     const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
-    let decrypted = Buffer.concat([decipher.update(fileData), decipher.final()]);
+    const decrypted = Buffer.concat([
+      decipher.update(fileData),
+      decipher.final()
+    ]);
 
     return res.send({
       success: true,
@@ -53,7 +60,7 @@ app.post("/decrypt-media", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("DECRYPT ERROR:", err);
     return res.status(500).json({
       error: "Decryption failed",
       details: err.message
